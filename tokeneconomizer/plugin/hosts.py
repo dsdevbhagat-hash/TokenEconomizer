@@ -38,6 +38,7 @@ named `rollout-*`; Copilot's session-state transcript, or no transcript at all i
 hook process; Claude Code otherwise. Each plugin hook file except Claude Code's also passes
 `--host` explicitly, so detection is the fallback rather than the rule.
 """
+import glob
 import json
 import os
 import re
@@ -45,6 +46,13 @@ import shlex
 import time
 
 from .. import trace
+
+# A historical session's log is still being written, or just ended, inside this many seconds:
+# it is left for its own SessionEnd (or the next SessionStart's `pending_sessions`) rather than
+# backfilled, the same staleness `fold.STALE_S` uses for a session this plugin already knows
+# about. Kept as a plain constant rather than importing `fold` here, since `hosts` stays the
+# thin translator layer every mechanism and `fold` itself build on.
+HISTORY_QUIET_S = 600
 
 _RESPONSE_KEYS = ("stdout", "stderr", "output", "aggregated_output", "formatted_output",
                   "content", "result", "error", "message", "text_result_for_llm")
@@ -195,6 +203,23 @@ class Host:
     def tool_usage(self, trace_path):
         return trace.tool_usage(trace_path)
 
+    # -- backfill: learning from sessions this plugin never saw hooked -------------------
+    # Whether `historical_sessions` is more than the base no-op below -- cheap for
+    # `backfill.pending` to check so that a host with nothing to backfill never has the plugin
+    # spawn a process for it at every repository's first session.
+    historical_sessions_supported = False
+
+    def historical_sessions(self, repo, env):
+        """Past sessions this agent's OWN logs still hold for `repo`, independent of anything
+        this plugin has recorded -- what `backfill` seeds the first time a repository is seen,
+        so it is learned from in full rather than only from the sessions that follow.
+
+        (session_id, transcript_path, mtime), oldest first; empty for a host that keeps no log
+        a backfill can read on its own (most of them: this is read straight off disk, with no
+        hook payload to go by, so it takes a real log format and a stable location, which only
+        Claude Code's is, below)."""
+        return []
+
 
 def _failure_response(p):
     """A PostToolUseFailure payload's `error` as a response; None for any other payload. A
@@ -262,6 +287,79 @@ class ClaudeCode(Host):
 
     def tool_usage(self, trace_path):
         return trace.claude_tool_usage(os.path.realpath(trace_path))
+
+    historical_sessions_supported = True
+
+    def historical_sessions(self, repo, env):
+        """Every session logged under `<claude home>/projects/<escaped-cwd>/<session-id>.jsonl`
+        -- Claude Code's own transcripts, in the same format `transcript_path` always names, so
+        nothing here parses anything `trace.claude_*` does not already read.
+
+        A project directory's name encodes the cwd a session STARTED in, which can differ from
+        where it moved on to and from this checkout's own path (itself moved, or re-cloned), so
+        a candidate is not matched by that name: each file's own recorded `cwd` (`_first_cwd`)
+        is resolved to a repository exactly as a live hook would (`paths.repo_identity`), which
+        is what lets a worktree, or a re-clone with the same remote, match too. A checkout moved
+        since, with nothing left at its old path to resolve, is the one case this misses."""
+        from .paths import repo_identity
+        # `CLAUDE_CONFIG_DIR` is Claude Code's own override, read here only (this plugin sets
+        # nothing there); `env["HOME"]` before the real one, as `paths.home_dir` reads it,
+        # which is also what keeps a test's fake home from leaking into a real scan.
+        home = os.path.join(env.get("CLAUDE_CONFIG_DIR") or
+                            os.path.join(env.get("HOME") or os.path.expanduser("~"), ".claude"),
+                            "projects")
+        out = []
+        try:
+            projects = os.listdir(home)
+        except OSError:
+            return out
+        now = time.time()
+        for name in projects:
+            try:
+                files = glob.glob(os.path.join(home, name, "*.jsonl"))
+            except OSError:
+                continue
+            for path in files:
+                try:
+                    mtime = os.path.getmtime(path)
+                except OSError:
+                    continue
+                if now - mtime < HISTORY_QUIET_S:
+                    continue
+                cwd = _first_cwd(path)
+                if not cwd:
+                    continue
+                try:
+                    if repo_identity(cwd, env).key != repo.key:
+                        continue
+                except OSError:
+                    continue
+                out.append((os.path.splitext(os.path.basename(path))[0], path, mtime))
+        out.sort(key=lambda t: t[2])
+        return out
+
+
+def _first_cwd(path):
+    """The `cwd` Claude Code recorded on the first entry of `path` that has one; None where
+    none of the first entries do (an unreadable file, or one with nothing in it yet). Reads a
+    handful of lines, never the whole file -- these transcripts run to tens of megabytes."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for _ in range(50):
+                line = fh.readline()
+                if not line:
+                    break
+                if '"cwd"' not in line:
+                    continue
+                try:
+                    cwd = json.loads(line).get("cwd")
+                except ValueError:
+                    continue
+                if isinstance(cwd, str) and cwd:
+                    return cwd
+    except OSError:
+        pass
+    return None
 
 
 _CODEX_SHELL = {"bash", "shell", "exec_command", "local_shell", "unified_exec",

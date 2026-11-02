@@ -24,7 +24,7 @@ import os
 import time
 
 from .. import loopguard
-from . import denylist, fold, repomap, repos, sidecall
+from . import backfill, denylist, fold, repomap, repos, sidecall
 from .hosts import merge_outputs
 from .paths import ensure_launcher
 
@@ -170,6 +170,14 @@ class LiveController:
         repos.note_repo(self.ctx.root, self.ctx.repo)
         repos.prune_pins(self.ctx.root, self.host.name)
         repos.start_migration(self.ctx)
+        # The first session start a repository and host ever see here also backfills its
+        # pre-plugin history (`backfill=off` to skip it): the scan this takes runs detached,
+        # like a fold itself, except where a test's `TE_FOLD_SYNC=1` keeps everything inline.
+        if backfill.pending(self.ctx):
+            if self.ctx.env.get("TE_FOLD_SYNC") == "1":
+                backfill.run(self.ctx, limit=self.cfg.backfill_sessions)
+            else:
+                self.ctx.spawn(["backfill"], "backfill.log")
         fold.spawn_fold(self.ctx, fold.pending_sessions(self.ctx, exclude=(self.sid,)))
         return merge_outputs(*outputs)
 
