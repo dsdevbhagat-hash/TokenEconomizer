@@ -32,6 +32,9 @@ def env(tmp_path):
             # Facts are learned here without a model call. Micro-skills is off by default, and
             # its `on` adds the proposer; both have their own tests.
             "TE_MICROSKILLS": "envfacts",
+            # Backfill's own tests point this wherever they like; everything else must never
+            # scan whatever real history happens to sit in the machine's actual ~/.claude.
+            "CLAUDE_CONFIG_DIR": str(tmp_path / "no-claude-home"),
             "GIT_CEILING_DIRECTORIES": str(tmp_path), "PATH": os.environ.get("PATH", "")}
 
 

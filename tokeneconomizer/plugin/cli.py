@@ -11,6 +11,9 @@
     te toolprune measure              measure the request with and without the proposal
     te toolprune apply-pending        write a pending `auto` deny list once the repository has
                                       been idle long enough (the fold starts it, detached)
+    te backfill [--all]               seed and fold this repository's history from before the
+                                      plugin ever saw it (its first session start already did
+                                      this once; --all ignores the backfill_sessions cap)
     te config show                    each mechanism on or off, its settings, the guard's thresholds
     te config set KEY=VALUE ...       e.g. `loopguard=off`, `microskills=on`,
                                       `loopguard.min_turns=12` (this repository; `--global` for
@@ -42,7 +45,8 @@ import sys
 import time
 
 from .. import loopguard
-from . import accounting, denylist, fold, hosts, paths, repomap, repos, sidecall, toolcheck
+from . import accounting, backfill, denylist, fold, hosts, paths, repomap, repos, sidecall, \
+    toolcheck
 from .config import canonical, unset_config, write_config
 from .context import LiveContext
 from .paths import state_root
@@ -130,6 +134,7 @@ def cmd_status(args):
                                                       ctx.host.name)},
         "loopguard": {"mode": cfg.loopguard, "envelope": env_tracker.envelope,
                       "ended_green_turns": len(env_tracker.resolved_turns)},
+        "backfill": ctx.store.read("backfill.json"),
         "ledger": ledger})
     if args.json:
         print(json.dumps(out, indent=2, default=str))
@@ -150,6 +155,13 @@ def cmd_status(args):
         print(f"  warning      {w}")
     if out["session_note"]:
         print(f"  note         {out['session_note']}")
+    bf = out["backfill"]
+    if bf:
+        print(f"  backfill     {bf['found']} earlier session(s) found, {bf['seeded']} seeded "
+              f"at {_when(bf['at'])} (`te backfill` runs it again)")
+    elif ctx.host.historical_sessions_supported and cfg.backfill:
+        print("  backfill     not run yet (its first session start will; `te backfill` runs it "
+              "now)")
     print(f"  sessions     {ledger['sessions']} folded, "
           f"{accounting.fmt_tokens(ledger['effective_tokens'])} effective tokens, plugin "
           f"overhead {accounting.fmt_tokens(ledger['overhead_tokens'])} "
@@ -518,6 +530,25 @@ def cmd_fold(args):
     return 0
 
 
+def cmd_backfill(args):
+    """Seed and fold this repository's history from before it ever saw the plugin (a
+    repository's first session start already does this once, detached; see `backfill.py`).
+    Runs again regardless of that mark -- for a newly supported agent, a deeper look after
+    raising `backfill_sessions`, or just to see what it finds."""
+    ctx = _ctx(args)
+    records, found = backfill.run(ctx, limit=None if args.all else ctx.config.backfill_sessions)
+    if not found:
+        print(f"no earlier {ctx.host.name} sessions found for {ctx.repo.label} outside what "
+              f"this plugin already knows")
+        return 0
+    print(f"{found} earlier session(s) found for {ctx.repo.label}; folded "
+          f"{len(records)}" + ("" if records else " (nothing new: already known)"))
+    if args.verbose:
+        for rec in records:
+            print(json.dumps(rec, default=str))
+    return 0
+
+
 def cmd_judge(args):
     """The detached half of the stuck judge (see plugin/judge.py); not for people."""
     from . import judge
@@ -741,6 +772,11 @@ def build_parser():
     p.add_argument("--session", action="append")
     p.add_argument("--verbose", action="store_true")
     p.set_defaults(fn=cmd_fold)
+    p = add("backfill")
+    p.add_argument("--all", action="store_true",
+                   help="ignore backfill_sessions and seed every session found")
+    p.add_argument("--verbose", action="store_true")
+    p.set_defaults(fn=cmd_backfill)
     p = add("judge")
     p.add_argument("--session", required=True)
     p.add_argument("--job", required=True)

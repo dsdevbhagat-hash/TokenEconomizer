@@ -25,7 +25,13 @@ The defaults:
                                 the session's ledger;
   * shadow      = False      -- with True, every decision is computed and logged but none
                                 reaches the agent: the way to measure a mechanism before
-                                trusting it.
+                                trusting it;
+  * backfill    = True       -- a repository's first session start also seeds it with every
+                                earlier session the agent's own logs still hold for it (Claude
+                                Code only so far: `hosts.ClaudeCode.historical_sessions`), so
+                                what runs from then on learns the whole history, not only what
+                                follows. Runs once per repository and host; `te backfill` runs
+                                it again by hand.
 
 Each mechanism also takes a plain `on` / `off` (`on` = the value above), and has settings a
 person can tune by hand:
@@ -46,6 +52,11 @@ person can tune by hand:
   * loopguard.<name>            -- one guard threshold, pinned over the preset and over what the
                                    repository's history learned (LOOPGUARD_KEYS);
   * repomap, repomap_tokens, repomap_python, repomap_timeout -- the opt-in repository map;
+  * backfill_sessions           -- caps how many of the most recent historical sessions a
+                                   repository's first backfill seeds at once (0: no cap), so a
+                                   repository with years of history does not hand micro-skills'
+                                   paid proposer dozens of sessions the moment it is installed;
+                                   `te backfill --all` ignores the cap;
   * pi_extensions, pi_cli       -- on Pi, the extensions the plugin's own model calls load (a
                                    custom provider's, whose model they could not reach otherwise;
                                    comma-separated paths), and the `pi` they run.
@@ -166,6 +177,8 @@ class LiveConfig:
     paid_model: str = ""
     pi_extensions: list = field(default_factory=list)
     pi_cli: str = ""
+    backfill: bool = True
+    backfill_sessions: int = 200
     shadow: bool = False
     vocabulary: str = "auto"
     warnings: list = field(default_factory=list)
@@ -174,7 +187,7 @@ class LiveConfig:
                 "loopguard": LOOPGUARD, "repomap": REPOMAP, "loopguard_aggr": AGGR,
                 "vocabulary": ("auto", "generic", "python-git", "node-web")}
     # The smallest value a number setting takes, where it is not 1.
-    _MIN = {"toolprune_quiet_minutes": 0}
+    _MIN = {"toolprune_quiet_minutes": 0, "backfill_sessions": 0}
 
     def as_dict(self):
         d = asdict(self)
@@ -279,7 +292,8 @@ _ENV = {"TE_MODE": "mode", "TE_SHADOW": "shadow",
         "TE_LOOPGUARD_NUDGES": "loopguard_nudges",
         "TE_REPOMAP": "repomap", "TE_REPOMAP_TOKENS": "repomap_tokens",
         "TE_REPOMAP_PYTHON": "repomap_python", "TE_REPOMAP_TIMEOUT": "repomap_timeout",
-        "TE_PI_EXTENSIONS": "pi_extensions", "TE_PI_CLI": "pi_cli"}
+        "TE_PI_EXTENSIONS": "pi_extensions", "TE_PI_CLI": "pi_cli",
+        "TE_BACKFILL": "backfill", "TE_BACKFILL_SESSIONS": "backfill_sessions"}
 _ENV_THRESHOLDS = ("TE_SPIRAL_THRESHOLDS", "TE_LOOPGUARD_THRESHOLDS")
 
 
